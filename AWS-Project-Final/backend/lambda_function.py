@@ -11,8 +11,6 @@ import os
 import random
 import re
 import unicodedata
-import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
@@ -23,12 +21,12 @@ logger.setLevel(logging.INFO)
 
 REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 TABLE_NAME = os.environ.get("DYNAMODB_TABLE", "MealRecipesTable")
-ORDERS_TABLE_NAME = os.environ.get("ORDERS_TABLE", "FoodOrdersTable")
 MAX_INPUT_LENGTH = 200
 MAX_KEYWORDS = 10
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
-orders_table = dynamodb.Table(ORDERS_TABLE_NAME)
+bedrock = boto3.client("bedrock-runtime", region_name=REGION)
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "apac.amazon.nova-lite-v1:0")
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -163,114 +161,82 @@ def ingredient_score(recipe, keywords):
     return sum(1 for term in keywords if any(normalize(term) in ing for ing in ingredients))
 
 
-def parse_order_body(event):
+
+def parse_chat_body(event):
     body = event.get("body") or "{}"
     if event.get("isBase64Encoded"):
         import base64
         body = base64.b64decode(body).decode("utf-8")
     try:
-        return json.loads(body)
+        payload = json.loads(body)
     except (TypeError, json.JSONDecodeError):
-        raise ValueError("Dữ liệu đơn hàng không phải JSON hợp lệ.")
+        raise ValueError("Nội dung gửi lên không phải JSON hợp lệ.")
+    if not isinstance(payload, dict):
+        raise ValueError("Dữ liệu trò chuyện không hợp lệ.")
+    return payload
 
 
-def create_order(event):
-    payload = parse_order_body(event)
-    customer = payload.get("customer") or {}
-    name = str(customer.get("name") or "").strip()
-    phone = str(customer.get("phone") or "").strip()
-    address = str(customer.get("address") or "").strip()
-    payment_method = str(payload.get("paymentMethod") or "cod").strip().lower()
-    raw_items = payload.get("items")
+def chat_with_cooking_assistant(event):
+    payload = parse_chat_body(event)
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        return response(400, {"error": "Hãy gửi ít nhất một tin nhắn."})
+    if len(raw_messages) > 12:
+        raw_messages = raw_messages[-12:]
 
-    if not name or len(name) > 80:
-        raise ValueError("Tên người nhận là bắt buộc và tối đa 80 ký tự.")
-    if not re.fullmatch(r"[0-9 +().-]{9,16}", phone):
-        raise ValueError("Số điện thoại không hợp lệ.")
-    if not address or len(address) > 250:
-        raise ValueError("Địa chỉ nhận hàng là bắt buộc và tối đa 250 ký tự.")
-    if payment_method != "cod":
-        raise ValueError("Hiện chỉ hỗ trợ thanh toán khi nhận hàng (COD).")
-    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 20:
-        raise ValueError("Đơn hàng phải có từ 1 đến 20 món.")
+    messages = []
+    for item in raw_messages:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        if len(content) > 1800:
+            raise ValueError("Mỗi tin nhắn tối đa 1.800 ký tự.")
+        messages.append({"role": role, "content": [{"text": content}]})
 
-    items = []
-    total = 0
-    for raw in raw_items:
-        if not isinstance(raw, dict):
-            raise ValueError("Thông tin món ăn không hợp lệ.")
-        item_id = str(raw.get("id") or "").strip()
-        item_name = str(raw.get("name") or "").strip()
-        category = str(raw.get("category") or "").strip()
-        try:
-            price = int(raw.get("price"))
-            quantity = int(raw.get("quantity"))
-        except (TypeError, ValueError):
-            raise ValueError("Giá và số lượng món ăn phải là số nguyên.")
-        if not item_id or len(item_id) > 40 or not item_name or len(item_name) > 120:
-            raise ValueError("Thiếu mã hoặc tên món ăn hợp lệ.")
-        if price < 1 or price > 10000000 or quantity < 1 or quantity > 50:
-            raise ValueError("Giá hoặc số lượng món ăn nằm ngoài giới hạn.")
-        line_total = price * quantity
-        total += line_total
-        items.append({
-            "id": item_id,
-            "name": item_name,
-            "category": category[:50],
-            "price": price,
-            "quantity": quantity,
-            "lineTotal": line_total,
-        })
+    if not messages or messages[-1]["role"] != "user":
+        return response(400, {"error": "Tin nhắn cuối cùng phải là câu hỏi của người dùng."})
 
-    order_id = "BTM-" + uuid.uuid4().hex[:10].upper()
-    created_at = datetime.now(timezone.utc).isoformat()
-    order = {
-        "OrderID": order_id,
-        "CreatedAt": created_at,
-        "Status": "RECEIVED",
-        "Customer": {"Name": name, "Phone": phone, "Address": address},
-        "Items": items,
-        "TotalAmount": total,
-        "PaymentMethod": "COD",
-    }
-    orders_table.put_item(Item=order, ConditionExpression="attribute_not_exists(OrderID)")
-    logger.info("Created order %s with %s items; total=%s", order_id, len(items), total)
-    return response(201, {
-        "message": "Đặt hàng thành công.",
-        "order": order,
-        "source": "dynamodb",
-    })
+    context = payload.get("context") or {}
+    ingredients = str(context.get("ingredients") or "").strip()[:500]
+    context_note = ""
+    if ingredients:
+        context_note = "\\nNguyên liệu người dùng đang có trên trang: " + ingredients
 
-
-
-def get_order_status(event):
-    path_params = event.get("pathParameters") or {}
-    order_id = str(path_params.get("orderId") or "").strip().upper()
-    if not re.fullmatch(r"BTM-[A-F0-9]{10}", order_id):
-        return response(400, {"error": "Mã đơn hàng không đúng định dạng."})
-
-    result = orders_table.get_item(
-        Key={"OrderID": order_id},
-        ConsistentRead=True
+    system_prompt = (
+        "Bạn là Bếp Thông Minh, trợ lý AI chuyên hỗ trợ nấu ăn tại nhà. "
+        "Luôn trả lời bằng tiếng Việt tự nhiên, dễ hiểu, thân thiện và thực tế. "
+        "Ưu tiên món ăn Việt Nam và nguyên liệu dễ mua. Bạn có thể: gợi ý món từ nguyên liệu; "
+        "hướng dẫn công thức theo từng bước, định lượng và thời gian; đề xuất nguyên liệu thay thế; "
+        "lập danh sách đi chợ; giải thích lỗi thường gặp khi nấu; đưa ra ước tính dinh dưỡng khi được hỏi. "
+        "Khi hướng dẫn nấu thịt, cá, trứng hoặc hải sản, nhắc người dùng nấu chín an toàn khi phù hợp. "
+        "Không bịa rằng một cửa hàng đang có hàng hoặc một nguyên liệu có sẵn ở địa điểm cụ thể. "
+        "Không đưa chẩn đoán hay phác đồ điều trị; thông tin dinh dưỡng chỉ mang tính tham khảo. "
+        "Nếu thiếu thông tin quan trọng, hỏi lại ngắn gọn. Trình bày câu trả lời bằng các bước hoặc gạch đầu dòng khi hữu ích."
+        + context_note
     )
-    order = result.get("Item")
-    if not order:
-        return response(404, {"error": "Không tìm thấy đơn hàng. Vui lòng kiểm tra lại mã đơn."})
 
-    # Only return tracking information; never expose customer phone/address.
-    public_order = {
-        "OrderID": order.get("OrderID"),
-        "CreatedAt": order.get("CreatedAt"),
-        "Status": order.get("Status"),
-        "Items": order.get("Items", []),
-        "TotalAmount": order.get("TotalAmount", 0),
-        "PaymentMethod": order.get("PaymentMethod", "COD"),
-    }
-    return response(200, {
-        "message": "Tra cứu đơn hàng thành công.",
-        "order": public_order,
-        "source": "dynamodb",
-    })
+    try:
+        result = bedrock.converse(
+            modelId=BEDROCK_MODEL_ID,
+            system=[{"text": system_prompt}],
+            messages=messages,
+            inferenceConfig={"maxTokens": 700, "temperature": 0.5},
+        )
+        content_blocks = result.get("output", {}).get("message", {}).get("content", [])
+        answer = "\\n".join(block.get("text", "") for block in content_blocks if block.get("text"))
+        if not answer:
+            raise RuntimeError("Mô hình không trả về nội dung.")
+        return response(200, {"reply": answer, "model": BEDROCK_MODEL_ID})
+    except ClientError:
+        logger.exception("Amazon Bedrock request failed")
+        return response(502, {"error": "Chatbot chưa gọi được Amazon Bedrock. Kiểm tra quyền IAM, model access và BEDROCK_MODEL_ID."})
+    except Exception:
+        logger.exception("Cooking assistant failed")
+        return response(500, {"error": "Chatbot gặp lỗi nội bộ. Hãy thử lại sau."})
+
 
 def lambda_handler(event, context):
     method = (
@@ -278,30 +244,23 @@ def lambda_handler(event, context):
         or (event.get("requestContext", {}).get("http") or {}).get("method")
         or "GET"
     ).upper()
+    path = (event.get("path") or event.get("rawPath") or event.get("resource") or "").rstrip("/")
+
     if method == "OPTIONS":
         return response(200, {"message": "CORS OK"})
-    if method == "POST":
+
+    # POST /recipes is reserved for the cooking assistant; no food-ordering routes remain.
+    if method == "POST" and (path.endswith("/recipes") or path.endswith("/chat")):
         try:
-            return create_order(event)
+            return chat_with_cooking_assistant(event)
         except ValueError as exc:
             return response(400, {"error": str(exc)})
-        except ClientError:
-            logger.exception("Could not save order to DynamoDB")
-            return response(500, {"error": "Không lưu được đơn hàng. Kiểm tra bảng FoodOrdersTable và quyền IAM."})
         except Exception:
-            logger.exception("Unhandled order creation error")
-            return response(500, {"error": "Lỗi khi tạo đơn hàng. Xem CloudWatch Logs để biết chi tiết."})
-    if method == "GET" and (event.get("pathParameters") or {}).get("orderId"):
-        try:
-            return get_order_status(event)
-        except ClientError:
-            logger.exception("Could not retrieve order from DynamoDB")
-            return response(500, {"error": "Không tra cứu được đơn hàng. Kiểm tra quyền IAM và bảng FoodOrdersTable."})
-        except Exception:
-            logger.exception("Unhandled order lookup error")
-            return response(500, {"error": "Lỗi khi tra cứu đơn hàng. Xem CloudWatch Logs để biết chi tiết."})
+            logger.exception("Unhandled cooking assistant error")
+            return response(500, {"error": "Lỗi khi xử lý câu hỏi nấu ăn."})
+
     if method != "GET":
-        return response(405, {"error": "Chỉ hỗ trợ GET để tìm công thức và POST để tạo đơn hàng."})
+        return response(405, {"error": "Chỉ hỗ trợ GET để tìm công thức và POST để trò chuyện với trợ lý nấu ăn."})
 
     try:
         params = query_params(event)
