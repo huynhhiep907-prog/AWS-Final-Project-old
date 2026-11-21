@@ -173,6 +173,28 @@
     </section>
   </main>
 
+
+    <section id="cooking-chatbot" class="mb-8 rounded-2xl border border-orange-100 bg-white/95 p-5 shadow-sm sm:p-7">
+      <div class="mb-4">
+        <p class="text-xs font-extrabold uppercase tracking-wider text-orange-700">🤖 AI COOKING ASSISTANT</p>
+        <h2 class="mt-1 text-xl font-extrabold">Trợ lý nấu ăn Bếp Thông Minh</h2>
+        <p class="mt-1 text-sm text-slate-500">Hỏi về công thức, cách thay thế nguyên liệu, mẹo nấu ăn hoặc danh sách đi chợ.</p>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-2">
+        <button type="button" class="chat-suggestion rounded-full border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-800" data-question="Tôi có trứng và cà chua, gợi ý món dễ nấu trong 15 phút.">🥚 Gợi ý món nhanh</button>
+        <button type="button" class="chat-suggestion rounded-full border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-800" data-question="Hãy hướng dẫn tôi nấu một món ăn từng bước, dành cho người mới bắt đầu.">📖 Hướng dẫn nấu</button>
+        <button type="button" class="chat-suggestion rounded-full border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-800" data-question="Tạo danh sách nguyên liệu cần mua cho món bò lúc lắc, chia theo số lượng.">🛒 Lập danh sách đi chợ</button>
+      </div>
+      <div id="chat-messages" class="mb-3 flex max-h-96 min-h-40 flex-col gap-3 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3" aria-live="polite">
+        <div class="max-w-[90%] self-start rounded-xl bg-white p-3 text-sm text-slate-700 shadow-sm">Xin chào! Mình là trợ lý nấu ăn. Bạn đang có nguyên liệu gì hoặc muốn nấu món nào hôm nay?</div>
+      </div>
+      <form id="chat-form" class="flex flex-col gap-2 sm:flex-row">
+        <input id="chat-input" class="filter-control flex-1" maxlength="1800" autocomplete="off" placeholder="Ví dụ: Không có bơ thì thay bằng gì?" aria-label="Tin nhắn cho trợ lý nấu ăn">
+        <button id="chat-send" type="submit" class="rounded-xl bg-orange-500 px-5 py-3 font-bold text-white hover:bg-orange-600">Gửi câu hỏi</button>
+      </form>
+      <p class="mt-2 text-xs text-slate-400">Câu trả lời do AI tạo ra, có thể chưa chính xác. Hãy kiểm tra kỹ thông tin dị ứng và an toàn thực phẩm.</p>
+    </section>
+
   <div id="recipe-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-panel bg-white rounded-2xl shadow-2xl w-full max-w-2xl">
       <div class="flex items-start gap-4 p-5 border-b border-slate-100">
@@ -629,6 +651,46 @@
     $("location-search").addEventListener("click",searchAddressLocation);
     $("location-gps").addEventListener("click",useCurrentLocation);
     $("location-address").addEventListener("keydown",function(event){if(event.key==="Enter")searchAddressLocation();});
+
+
+    const chatHistory = [];
+    function appendChatMessage(role, message) {
+      const row=document.createElement("div");
+      row.className="max-w-[90%] rounded-xl p-3 text-sm leading-relaxed shadow-sm whitespace-pre-wrap "+(role==="user"?"self-end bg-orange-500 text-white":"self-start bg-white text-slate-700");
+      row.textContent=message;
+      $("chat-messages").appendChild(row);
+      $("chat-messages").scrollTop=$("chat-messages").scrollHeight;
+      return row;
+    }
+    async function sendChatMessage(message) {
+      const text=String(message||"").trim();
+      if(!text) return;
+      $("chat-input").value="";
+      appendChatMessage("user",text);
+      chatHistory.push({role:"user",content:text});
+      const pending=appendChatMessage("assistant","Đang suy nghĩ...");
+      $("chat-send").disabled=true;
+      try {
+        const response=await fetch(API_URL,{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({messages:chatHistory.slice(-12),context:{ingredients:$("ingredients").value.trim()}})});
+        const data=await response.json();
+        if(!response.ok) throw new Error(data.error||("HTTP "+response.status));
+        const reply=String(data.reply||"Mình chưa tạo được câu trả lời. Bạn thử hỏi lại nhé.");
+        pending.textContent=reply;
+        chatHistory.push({role:"assistant",content:reply});
+      } catch(error) {
+        pending.textContent="Chưa kết nối được chatbot: "+error.message+". Hãy kiểm tra POST /recipes trên API Gateway, quyền Bedrock của Lambda và model access.";
+        chatHistory.pop();
+      } finally {
+        $("chat-send").disabled=false;
+        $("chat-input").focus();
+        $("chat-messages").scrollTop=$("chat-messages").scrollHeight;
+      }
+    }
+    $("chat-form").addEventListener("submit",function(event){event.preventDefault();sendChatMessage($("chat-input").value);});
+    document.querySelectorAll(".chat-suggestion").forEach(function(button){
+      button.addEventListener("click",function(){sendChatMessage(button.dataset.question);});
+    });
 
     $("search-btn").addEventListener("click", function() { searchRecipes(false); });
     $("random-btn").addEventListener("click", function() { searchRecipes(true); });
