@@ -203,7 +203,7 @@ def chat_with_cooking_assistant(event):
     ingredients = str(context.get("ingredients") or "").strip()[:500]
     context_note = ""
     if ingredients:
-        context_note = "\\nNguyên liệu người dùng đang có trên trang: " + ingredients
+        context_note = "\nNguyên liệu người dùng đang có trên trang: " + ingredients
 
     system_prompt = (
         "Bạn là Bếp Thông Minh, trợ lý AI chuyên hỗ trợ nấu ăn tại nhà. "
@@ -226,7 +226,7 @@ def chat_with_cooking_assistant(event):
             inferenceConfig={"maxTokens": 700, "temperature": 0.5},
         )
         content_blocks = result.get("output", {}).get("message", {}).get("content", [])
-        answer = "\\n".join(block.get("text", "") for block in content_blocks if block.get("text"))
+        answer = "\n".join(block.get("text", "") for block in content_blocks if block.get("text"))
         if not answer:
             raise RuntimeError("Mô hình không trả về nội dung.")
         return response(200, {"reply": answer, "model": BEDROCK_MODEL_ID})
