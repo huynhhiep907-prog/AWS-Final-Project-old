@@ -614,7 +614,9 @@
           L.marker([place.lat,place.lon]).addTo(marketLayer).bindPopup(place.name+" · "+place.distance.toFixed(1)+" km");
         });
         $("market-count").textContent=places.length+" địa điểm";
-        setLocationStatus(places.length ? "Đã tìm thấy địa điểm trong bán kính "+(radius/1000)+" km." : "Chưa tìm thấy chợ/siêu thị được ghi nhận trong bán kính này. Thử tăng bán kính.");
+        const needed=$("missing-ingredients").value.trim();
+        const inventoryNote=needed ? " Nguyên liệu bạn cần mua: "+needed+". Bản đồ không xác minh tồn kho của từng cửa hàng." : "";
+        setLocationStatus((places.length ? "Đã tìm thấy địa điểm trong bán kính "+(radius/1000)+" km." : "Chưa tìm thấy chợ/siêu thị được ghi nhận trong bán kính này. Thử tăng bán kính.")+inventoryNote);
         setTimeout(function(){marketMap.invalidateSize();},100);
       } catch(error) {
         $("market-count").textContent="Không tải được";
